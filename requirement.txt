@@ -1,0 +1,11 @@
+yfinance
+
+prophet
+
+pandas
+
+matplotlib
+
+pysentimiento
+
+dotenv

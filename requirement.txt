@@ -1,11 +1,9 @@
 yfinance
-
 prophet
-
 pandas
-
 matplotlib
-
 pysentimiento
+python-dotenv
+requests
+beautifulsoup4
 
-dotenv

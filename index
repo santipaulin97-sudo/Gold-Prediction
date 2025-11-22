@@ -1,0 +1,236 @@
+import yfinance as yf
+import pandas as pd
+from datetime import datetime, date
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+from email.mime.base import MIMEBase
+from email import encoders
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+import numpy as np
+
+# -----------------------
+# CONFIGURACIÓN PRINCIPAL
+# -----------------------
+TICKER_ORO = "GC=F"
+
+
+# -----------------------
+# FUNCIÓN PARA ANALIZAR ORO
+# -----------------------
+def analizar_proyeccion_oro(ticker):
+    try:
+        hoy = datetime.now()
+        fecha_inicio = datetime(hoy.year, 1, 1)
+
+        datos_oro = yf.download(ticker, start=fecha_inicio, end=hoy, progress=False, timeout=30)
+        if datos_oro.empty:
+            return None, None, None, None
+
+        precio_inicial = float(datos_oro['Close'].iloc[0])
+        precio_actual = float(datos_oro['Close'].iloc[-1])
+        rendimiento_ytd = ((precio_actual - precio_inicial) / precio_inicial) * 100
+
+        datos_oro['DiasOrdinal'] = datos_oro.index.map(date.toordinal)
+        X = datos_oro[['DiasOrdinal']]
+        y = datos_oro['Close']
+
+        modelo = LinearRegression()
+        modelo.fit(X, y)
+
+        fechas_futuras = pd.date_range(start=hoy, end="2026-12-31", freq='QS-DEC').to_pydatetime()
+        if hoy not in fechas_futuras:
+            fechas_futuras = np.insert(fechas_futuras, 0, hoy)
+
+        dias_futuros_ord = [d.toordinal() for d in fechas_futuras]
+        df_prediccion_futura = pd.DataFrame(dias_futuros_ord, columns=['DiasOrdinal'])
+
+        prediccion_precios_futuros = modelo.predict(df_prediccion_futura).flatten()
+        df_tabla_proyecciones = pd.DataFrame({
+            'Fecha Proyectada': [f.strftime('%B %Y') for f in fechas_futuras],
+            'Precio Estimado (USD)': [f"${float(p):,.2f}" for p in prediccion_precios_futuros]
+        })
+
+        ultimo_dia_grafico = date(2026, 12, 31).toordinal()
+        dias_proyeccion_grafico = np.arange(X['DiasOrdinal'].iat[-1] + 1, ultimo_dia_grafico + 1)
+        df_prediccion_grafico = pd.DataFrame(dias_proyeccion_grafico, columns=['DiasOrdinal'])
+        proyeccion_grafico = modelo.predict(df_prediccion_grafico).flatten()
+        fechas_grafico = [date.fromordinal(d) for d in dias_proyeccion_grafico]
+        df_proyeccion_completa = pd.DataFrame({'Fecha': fechas_grafico, 'Proyeccion': proyeccion_grafico})
+        df_proyeccion_completa.set_index('Fecha', inplace=True)
+
+        analisis = {
+            "precio_actual": precio_actual,
+            "rendimiento_ytd": rendimiento_ytd,
+            "precio_final_proyectado": prediccion_precios_futuros[-1]
+        }
+
+        # -----------------------
+        # Recomendación de analista
+        # -----------------------
+        if analisis['rendimiento_ytd'] > 10 and analisis['precio_final_proyectado'] > precio_actual:
+            analisis['decision'] = "Comprar"
+            analisis['justificacion'] = "Tendencia positiva, crecimiento esperado y protección contra inflación."
+        elif analisis['rendimiento_ytd'] < -5:
+            analisis['decision'] = "Vender"
+            analisis['justificacion'] = "El oro ha perdido valor y la proyección sugiere baja o consolidación."
+        else:
+            analisis['decision'] = "Mantener"
+            analisis['justificacion'] = "Mercado estable, se recomienda monitoreo cercano."
+
+        return datos_oro, df_proyeccion_completa, analisis, df_tabla_proyecciones
+
+    except Exception as e:
+        print(f"Error durante el análisis: {e}")
+        return None, None, None, None
+
+# -----------------------
+# FUNCIÓN PARA CREAR GRÁFICO
+# -----------------------
+def crear_grafico_oro(df_historico, df_proyeccion, analisis):
+    try:
+        nombre_archivo = "proyeccion_oro.png"
+        plt.style.use('seaborn-v0_8-darkgrid')
+        fig, ax = plt.subplots(figsize=(12, 8), dpi=200)
+
+        ax.plot(df_historico.index, df_historico['Close'], label=f'Precio Histórico ({datetime.now().year})', color='gold', linewidth=2.5)
+
+        if not df_proyeccion.empty:
+            ax.plot(df_proyeccion.index, df_proyeccion['Proyeccion'], label='Proyección de Tendencia (2025-2026)', color='dodgerblue', linestyle='--')
+            precio_final_proyectado = df_proyeccion['Proyeccion'].iat[-1]
+            ax.scatter(df_proyeccion.index[-1], precio_final_proyectado, color='green', zorder=5)
+            ax.text(df_proyeccion.index[-1], precio_final_proyectado, f" Proy. Dic 2026: ${float(precio_final_proyectado):,.2f}  ", ha='right', va='bottom', color='green')
+
+        ax.scatter(df_historico.index[-1], analisis['precio_actual'], color='red', zorder=5, label='Precio Actual')
+        ax.text(df_historico.index[-1], analisis['precio_actual'], f" ${float(analisis['precio_actual']):,.2f}", color='red')
+
+        ax.set_title(f'Análisis y Proyección de Tendencia del Oro', fontsize=16)
+        ax.set_ylabel('Precio (USD)', fontsize=12)
+        ax.set_xlabel('Fecha', fontsize=12)
+        ax.legend()
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+        fig.autofmt_xdate()
+        plt.tight_layout()
+        plt.savefig(nombre_archivo, dpi=300, bbox_inches='tight')
+        return nombre_archivo
+
+    except Exception as e:
+        print(f"Error al generar el gráfico: {e}")
+        return None
+
+# -----------------------
+# FUNCIÓN PARA ENVIAR CORREO
+# -----------------------
+def enviar_correo(cuerpo_html, archivo_grafico):
+    try:
+        msg = MIMEMultipart('related')
+        msg['From'] = EMAIL_REMITENTE
+        msg['To'] = EMAIL_DESTINATARIO
+        msg['Subject'] = f"Reporte de Proyección del Oro - {datetime.now().strftime('%d de %B, %Y')}"
+        msg.attach(MIMEText(cuerpo_html, 'html'))
+
+        with open(archivo_grafico, 'rb') as f:
+            img = MIMEImage(f.read())
+            img.add_header('Content-ID', '<grafico_oro>')
+            msg.attach(img)
+
+        with open(archivo_grafico, 'rb') as f:
+            mime = MIMEBase('image', 'png', filename=archivo_grafico)
+            mime.set_payload(f.read())
+            encoders.encode_base64(mime)
+            mime.add_header('Content-Disposition', 'attachment', filename=archivo_grafico)
+            msg.attach(mime)
+
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(EMAIL_REMITENTE, EMAIL_CONTRASENA)
+        server.sendmail(EMAIL_REMITENTE, EMAIL_DESTINATARIO, msg.as_string())
+        server.quit()
+        print("¡Correo enviado exitosamente!")
+
+    except Exception as e:
+        print(f"Error al enviar el correo electrónico: {e}")
+
+# -----------------------
+# BLOQUE PRINCIPAL
+# -----------------------
+if __name__ == "__main__":
+    df_historico, df_proyeccion, analisis, df_tabla = analizar_proyeccion_oro(TICKER_ORO)
+    archivo_grafico = crear_grafico_oro(df_historico, df_proyeccion, analisis)
+
+    if archivo_grafico:
+        tabla_html = df_tabla.to_html(index=False, justify='center', border=0, classes='projections_table')
+
+        cuerpo_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+body {{ font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f4f4f4; }}
+.container {{ width: 100%; max-width: 650px; margin: 20px auto; background-color: #ffffff; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }}
+.header {{ background-color: #D4AF37; color: #ffffff; padding: 20px; text-align: center; border-top-left-radius: 8px; border-top-right-radius: 8px; }}
+.header h1 {{ margin: 0; font-size: 24px; }}
+.content {{ padding: 25px; color: #333333; }}
+.content h2 {{ color: #2c3e50; border-bottom: 2px solid #D4AF37; padding-bottom: 8px; font-size: 20px; }}
+.summary-card {{ padding: 20px; margin: 20px 0; background-color: #eeeeee; border-radius: 6px; }}
+table.projections_table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }}
+table.projections_table th, table.projections_table td {{ border: 1px solid #dddddd; text-align: center; padding: 8px; }}
+table.projections_table th {{ background-color: #D4AF37; color: white; }}
+table.projections_table tr:nth-child(even) {{ background-color: #f9f9f9; }}
+.grafico {{ text-align: center; margin: 25px 0; }}
+.insight-card {{ background-color: #FFF8DC; border-left: 5px solid #D4AF37; padding: 20px; margin: 20px 0; border-radius: 6px; font-size: 14px; }}
+.insight-card h2 {{ color: #B8860B; margin-top: 0; }}
+.insight-card ul {{ padding-left: 20px; margin: 0; }}
+.insight-card li {{ margin-bottom: 8px; }}
+</style>
+</head>
+<body>
+<div class="container">
+<div class="header">
+<h1>Reporte de Proyección del Oro</h1>
+<p>{datetime.now().strftime('%d de %B, %Y')}</p>
+</div>
+<div class="content">
+<h2>Resumen del Oro</h2>
+<div class="summary-card">
+<p><strong>Precio Actual:</strong> ${analisis['precio_actual']:,.2f}</p>
+<p><strong>Rendimiento YTD:</strong> {analisis['rendimiento_ytd']:.2f}%</p>
+</div>
+
+<!-- Insight financiero ampliado -->
+<div class="insight-card">
+<h2>💡 Análisis y Contexto</h2>
+<ul>
+<li>El precio del oro ha subido un {analisis['rendimiento_ytd']:.2f}% en lo que va del año.</li>
+<li>Actualmente cotiza en ${analisis['precio_actual']:,.2f}, cerca de su máximo reciente.</li>
+<li>Expectativa de la FED: <strong>las tasas podrían subir ligeramente</strong> en los próximos meses, afectando temporalmente al oro.</li>
+<li>La tendencia proyectada sugiere un crecimiento continuo hasta diciembre 2026.</li>
+<li><strong>Decisión de Analista:</strong> {analisis['decision']} - {analisis['justificacion']}</li>
+<li><strong>Escenarios y Recomendaciones:</strong>
+  <ul>
+    <li>Si las tasas de interés suben: el oro podría estabilizarse o bajar ligeramente → Mantener posiciones y monitorear.</li>
+    <li>Si las tasas bajan: posible alza fuerte del oro → Considerar aumentar exposición o comprar gradualmente.</li>
+    <li>Movimiento brusco del mercado: usar estrategias de cobertura o vender parcialmente para proteger ganancias.</li>
+  </ul>
+</li>
+</ul>
+</div>
+
+
+<h2>Proyección Futura</h2>
+{tabla_html}
+
+<div class="grafico">
+<h2>Gráfico de Tendencia</h2>
+<img src="cid:grafico_oro" alt="Gráfico de Proyección del Oro" style="max-width:100%; height:auto;">
+</div>
+<p>Este reporte se genera automáticamente y refleja tendencias basadas en regresión lineal histórica.</p>
+</div>
+</div>
+</body>
+</html>
+"""
+        enviar_correo(cuerpo_html, archivo_grafico)
